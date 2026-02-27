@@ -278,18 +278,28 @@ class HazardHalfCheetah:
 
 class HazardAnt:
     """
-    Ant with three hazard sources:
-      1. Height hazard       – torso drops below threshold (falling)
-      2. Orientation hazard  – torso tilt exceeds safe range
-      3. Velocity hazard     – excessive speed
+    Ant with three hazard sources (tuned for RARE events):
+      1. Height hazard       – torso drops very low (severe fall/collapse)
+      2. Orientation hazard  – torso tilt is extreme (nearly flipped over)
+      3. Velocity hazard     – excessive speed (reckless running)
+
+    Thresholds are set so that a competent walking ant rarely triggers them,
+    but occasional wind gusts or aggressive gaits can cause hazard events.
+    This matches the experimental premise: rare but catastrophic events
+    that the agent must remember how to avoid.
+
+    Previous thresholds (height<0.3, tilt>0.5) triggered on ~25% of all
+    timesteps — way too frequent for a "rare event" study. These new
+    thresholds target ~5% trigger rate for a learning agent.
     """
 
     def __init__(
         self,
-        height_threshold: float = 0.3,
-        tilt_threshold: float = 0.5,
-        velocity_threshold: float = 5.0,
-        gust_probability: float = 0.05,
+        height_threshold: float = 0.2,     # was 0.3 — only severe falls
+        tilt_threshold: float = 0.85,       # was 0.5 — only near-flipping
+        velocity_threshold: float = 5.0,    # now actually checked!
+        gust_probability: float = 0.03,     # was 0.05 — rarer but stronger
+        gust_strength: float = 1.0,         # was 0.5 — gusts pack more punch
     ):
         try:
             import gymnasium as gym
@@ -304,6 +314,7 @@ class HazardAnt:
         self.tilt_threshold = tilt_threshold
         self.velocity_threshold = velocity_threshold
         self.gust_probability = gust_probability
+        self.gust_strength = gust_strength
 
         self.total_cost = 0
         self.episode_cost = 0
@@ -316,8 +327,10 @@ class HazardAnt:
     def step(self, action):
         action = np.clip(action, -1, 1)
 
+        # Random wind gusts — rarer but stronger, simulating sudden
+        # disturbances that a deployed robot might face
         if np.random.random() < self.gust_probability:
-            gust = np.random.uniform(-0.5, 0.5, self.action_dim)
+            gust = np.random.uniform(-self.gust_strength, self.gust_strength, self.action_dim)
             action = np.clip(action + gust, -1, 1)
 
         out = self.env.step(action)
@@ -330,12 +343,23 @@ class HazardAnt:
 
         cost = 0.0
 
+        # Hazard 1: severe fall — torso height drops dangerously low
+        # Normal walking height is ~0.55, threshold 0.2 means nearly collapsed
         if obs[0] < self.height_threshold:
             cost += 1.0
 
+        # Hazard 2: extreme tilt — quaternion xyz components too large
+        # means the ant is nearly flipped over
         if len(obs) > 4:
             orientation = obs[1:5]
             if np.any(np.abs(orientation[1:]) > self.tilt_threshold):
+                cost += 1.0
+
+        # Hazard 3: excessive velocity — reckless speed
+        # obs[13:19] are the 6 velocity components (3 linear + 3 angular)
+        if len(obs) > 19:
+            vel_magnitude = np.sqrt(np.sum(obs[13:19]**2))
+            if vel_magnitude > self.velocity_threshold:
                 cost += 1.0
 
         self.total_cost += cost

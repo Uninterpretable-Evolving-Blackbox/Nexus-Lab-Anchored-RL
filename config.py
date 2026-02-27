@@ -4,8 +4,13 @@ Hyperparameters and global config for PGR Safety experiments.
 All tuneable values live here so you can sweep them from one place.
 """
 
-import torch
 
+import random, numpy as np, torch
+
+def seed_everything(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
 # Automatically use GPU if available, otherwise CPU
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42

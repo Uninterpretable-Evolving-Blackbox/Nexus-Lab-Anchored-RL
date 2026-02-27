@@ -108,6 +108,18 @@ class SACAgent:
         # Track recent episode costs for λ update
         self.recent_costs = []  # costs from recent episodes
 
+        # ── Lambda stabilisation ──────────────────────────────────────
+        # EMA (exponential moving average) of episode cost smooths out
+        # the spiky signal that rare-event replay creates.  Without it,
+        # a single replay burst can make λ spike → policy collapse →
+        # more cost → λ spikes further (death spiral).
+        #
+        # EMA update:  ema = decay * ema + (1-decay) * new_value
+        # With decay=0.95, a one-off spike of 50 only moves the EMA by
+        # 2.5 instead of 50.  Sustained high cost still pushes λ up.
+        self.cost_ema = float(COST_LIMIT)  # start at target (neutral)
+        self.cost_ema_decay = 0.95         # higher = smoother / slower
+
         # ── Replay buffer ────────────────────────────────────────────────
         self.buffer = ReplayBuffer(state_dim, action_dim)
 
@@ -244,6 +256,13 @@ class SACAgent:
             avg_cost = np.mean(self.recent_costs)
             self.recent_costs = []  # reset
 
+            # ── EMA smoothing ─────────────────────────────────────────
+            # Instead of feeding raw avg_cost into the λ gradient, we
+            # update an exponential moving average first.  This prevents
+            # a single burst of replayed rare events from spiking λ.
+            self.cost_ema = (self.cost_ema_decay * self.cost_ema
+                            + (1 - self.cost_ema_decay) * avg_cost)
+
             # Dual gradient ASCENT: push λ toward satisfying the constraint
             # We negate because the optimizer does gradient DESCENT (minimizes),
             # but for the Lagrange dual we need ASCENT (maximize).
@@ -255,7 +274,7 @@ class SACAgent:
             # responds immediately regardless of λ's current value.
             # This matches how SAC tunes its entropy temperature α.
             self.lambda_opt.zero_grad()
-            lambda_loss = -self.log_lambda * (avg_cost - COST_LIMIT)
+            lambda_loss = -self.log_lambda * (self.cost_ema - COST_LIMIT)
             lambda_loss.backward()
             self.lambda_opt.step()
 
@@ -263,8 +282,11 @@ class SACAgent:
             self.lam = self.log_lambda.exp().item()
 
             # Clamp to prevent λ from going crazy
-            # Min: 0.01 (always some penalty)  Max: 100.0 (don't over-penalize)
-            self.lam = np.clip(self.lam, 0.01, 100.0)
+            # Max tightened from 100→20: even λ=20 makes cost 10× more
+            # important than reward, which is already very aggressive.
+            # The old cap of 100 allowed the death spiral we observed in
+            # Cheetah (PGR+Memory seeds 123, 456) and Ant (seed 42 @ 16k).
+            self.lam = np.clip(self.lam, 0.01, 20.0)
             self.log_lambda.data.copy_(torch.tensor(np.log(self.lam), device=DEVICE))
 
     def train_step(self):
@@ -700,5 +722,61 @@ class SACPGRMemoryAgent(SACPGRAgent):
             dones       = torch.cat(parts_d)
         else:
             states, actions, rewards, costs, next_states, dones = self.buffer.sample(BATCH_SIZE)
+
+        self._sac_update(states, actions, rewards, costs, next_states, dones)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SAC + Memory  (ABLATION BASELINE)
+#
+# This answers the reviewer question: "Why not just replay rare events directly
+# into SAC without a diffusion model?" If this agent matches PGR+Memory, our
+# diffusion model isn't adding value. If it's worse (pessimism collapse) or
+# unstable, that proves the diffusion model is necessary.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SACMemoryAgent(SACAgent):
+    """SAC + direct rare-event injection (no diffusion, no ICM).
+
+    Ablation baseline: injects raw hazard transitions into the SAC batch.
+    Tests whether the diffusion model is necessary, or if simple replay
+    of rare events is sufficient.
+    """
+
+    def __init__(self, state_dim: int, action_dim: int):
+        super().__init__(state_dim, action_dim)
+        self.rare_buffer = RareEventBuffer(state_dim, action_dim)
+
+    def add_transition(self, s, a, r, c, ns, d):
+        self.buffer.add(s, a, r, c, ns, d)
+        if c > 0:
+            self.rare_buffer.add(s, a, r, c, ns, d)
+
+    def train_step(self):
+        if len(self.buffer) < BATCH_SIZE:
+            return
+
+        n_rare = int(BATCH_SIZE * RARE_BATCH_RATIO) if len(self.rare_buffer) > 0 else 0
+        n_real = BATCH_SIZE - n_rare
+
+        real_s, real_a, real_r, real_c, real_ns, real_d = self.buffer.sample(n_real)
+
+        if n_rare > 0:
+            rare_sample = self.rare_buffer.sample(n_rare)
+            if rare_sample is not None:
+                rs, ra, rr, rc, rns, rd = rare_sample
+                states      = torch.cat([real_s, rs])
+                actions     = torch.cat([real_a, ra])
+                rewards     = torch.cat([real_r, rr])
+                costs       = torch.cat([real_c, rc])
+                next_states = torch.cat([real_ns, rns])
+                dones       = torch.cat([real_d, rd])
+            else:
+                states, actions, rewards, costs, next_states, dones = (
+                    real_s, real_a, real_r, real_c, real_ns, real_d
+                )
+        else:
+            states, actions, rewards, costs, next_states, dones = (
+                real_s, real_a, real_r, real_c, real_ns, real_d
+            )
 
         self._sac_update(states, actions, rewards, costs, next_states, dones)
