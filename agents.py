@@ -28,10 +28,11 @@ from config import (
     DEVICE, LR, GAMMA, TAU, BATCH_SIZE,
     LATENT_DIM, REPLAY_RATIO, PGR_START_BUFFER,
     RARE_BATCH_RATIO, RARE_WEIGHT,
+    HIGH_REWARD_BATCH_RATIO, HIGH_REWARD_WEIGHT,
     CFG_P_UNCOND, CFG_GUIDANCE_SCALE,
     COST_LIMIT, LAMBDA_LR, LAMBDA_INIT,
 )
-from buffers import ReplayBuffer, RareEventBuffer
+from buffers import ReplayBuffer, RareEventBuffer, HighRewardBuffer
 from networks import (
     QNetwork, GaussianPolicy,
     StateEncoder, ForwardModel,
@@ -588,39 +589,36 @@ class SACPGRAgent(SACAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class SACPGRMemoryAgent(SACPGRAgent):
-    """PGR + rare-event memory bank for hazardous transitions."""
+    """PGR + hazard memory + high-reward memory."""
 
     def __init__(self, state_dim: int, action_dim: int):
         super().__init__(state_dim, action_dim)
-        # Small dedicated buffer for catastrophic transitions
+        # Dedicated buffers for aversive and motivationally salient transitions.
         self.rare_buffer = RareEventBuffer(state_dim, action_dim)
+        self.high_reward_buffer = HighRewardBuffer(state_dim, action_dim)
 
     def add_transition(self, s, a, r, c, ns, d):
         """
-        Store transition in main buffer, AND if it's hazardous (cost > 0),
-        also store it in the rare-event buffer.
+        Store transition in main replay, hazard memory, and reward memory.
+        Hazard memory only keeps costly transitions; reward memory keeps the
+        best-rewarded transitions regardless of cost.
         """
         self.buffer.add(s, a, r, c, ns, d)
         if c > 0:   # this transition hit a hazard!
             self.rare_buffer.add(s, a, r, c, ns, d)
+        self.high_reward_buffer.add(s, a, r, c, ns, d)
 
     def train_step(self):
         """
-        PGR+Memory training: rare events injected at TWO levels.
+        Train with one mixed-replay path.
 
         Level 1 — Diffusion training (same as before):
-          80% normal buffer + 20% rare buffer with 5x loss weight.
-          Forces the diffusion model to remember hazard transitions.
+        Diffusion sees normal replay plus hazard and high-reward memory
+        samples.
 
         Level 2 — SAC policy training (NEW — Fix 3):
-          The SAC batch is split three ways: real + synthetic + rare.
-          This guarantees the policy sees actual hazard data every batch,
-          bypassing the diffusion quality bottleneck entirely.
-
-        The batch composition:
-          - n_real = BATCH_SIZE - n_syn - n_rare  (roughly 50%)
-          - n_syn  = BATCH_SIZE * REPLAY_RATIO    (30% synthetic)
-          - n_rare = BATCH_SIZE * RARE_BATCH_RATIO (20% rare)
+        SAC then updates once from a batch assembled from real replay,
+        optional synthetic replay, hazard memory, and reward memory.
         """
         if len(self.buffer) < BATCH_SIZE:
             return
@@ -634,44 +632,45 @@ class SACPGRMemoryAgent(SACPGRAgent):
             )
             scores_np = normalize_scores(self._compute_curiosity(s, a, ns).cpu().numpy())
 
-            # Update normalization stats from the current pool
-            # Bug 2 fix: clamp std and hardcode binary features
             pool_trans = self.buffer.get_transitions(idx)
             self.trans_mean = torch.FloatTensor(pool_trans.mean(axis=0)).to(DEVICE)
             std = np.maximum(pool_trans.std(axis=0), 1e-2)
             cost_idx = self.state_dim + self.action_dim + 1
-            std[cost_idx] = 1.0   # cost is binary, don't normalize
-            std[-1] = 1.0         # done is binary, don't normalize
+            std[cost_idx] = 1.0
+            std[-1] = 1.0
             self.trans_std = torch.FloatTensor(std).to(DEVICE)
 
-            # Train ICM
             self._train_icm()
 
             # ── Level 1: Diffusion training with rare-event injection ────
-            n_rare_diff = int(BATCH_SIZE * RARE_BATCH_RATIO)    # 20% rare
-            n_normal = BATCH_SIZE - n_rare_diff                  # 80% normal
+            n_rare_diff = min(int(BATCH_SIZE * RARE_BATCH_RATIO), len(self.rare_buffer))
+            n_reward_diff = min(int(BATCH_SIZE * HIGH_REWARD_BATCH_RATIO), len(self.high_reward_buffer))
+            n_normal = BATCH_SIZE - n_rare_diff - n_reward_diff
 
-            # Normal transitions from main buffer
             batch_idx = np.random.choice(len(idx), n_normal, replace=True)
             normal_trans = self.buffer.get_transitions(idx[batch_idx])
             normal_scores = scores_np[batch_idx]
-            normal_weights = np.ones(n_normal)  # weight = 1.0
+            normal_weights = np.ones(n_normal)
+            reward_prompt = np.quantile(scores_np, 0.75)
+            all_trans, all_scores, all_weights = normal_trans, normal_scores, normal_weights
 
-            # Inject rare transitions if available
-            if len(self.rare_buffer) > 0:
-                rare_trans = self.rare_buffer.get_transitions(min(n_rare_diff, len(self.rare_buffer)))
+            if n_rare_diff > 0:
+                rare_trans = self.rare_buffer.get_transitions(n_rare_diff)
                 if rare_trans is not None:
-                    # Bug 5 fix: use scores_np.max() NOT * 2
-                    # With * 2, hazards are mapped to unreachable prompt scores
                     rare_scores = np.ones(len(rare_trans)) * scores_np.max()
                     rare_weights = np.ones(len(rare_trans)) * RARE_WEIGHT
-                    all_trans = np.vstack([normal_trans, rare_trans])
-                    all_scores = np.concatenate([normal_scores, rare_scores])
-                    all_weights = np.concatenate([normal_weights, rare_weights])
-                else:
-                    all_trans, all_scores, all_weights = normal_trans, normal_scores, normal_weights
-            else:
-                all_trans, all_scores, all_weights = normal_trans, normal_scores, normal_weights
+                    all_trans = np.vstack([all_trans, rare_trans])
+                    all_scores = np.concatenate([all_scores, rare_scores])
+                    all_weights = np.concatenate([all_weights, rare_weights])
+
+            if n_reward_diff > 0:
+                reward_trans = self.high_reward_buffer.get_transitions(n_reward_diff)
+                if reward_trans is not None:
+                    reward_scores = np.ones(len(reward_trans)) * reward_prompt
+                    reward_weights = np.ones(len(reward_trans)) * HIGH_REWARD_WEIGHT
+                    all_trans = np.vstack([all_trans, reward_trans])
+                    all_scores = np.concatenate([all_scores, reward_scores])
+                    all_weights = np.concatenate([all_weights, reward_weights])
 
             all_weights = all_weights / all_weights.mean()
             self._train_diffusion(all_trans, all_scores, all_weights)
@@ -680,18 +679,18 @@ class SACPGRMemoryAgent(SACPGRAgent):
             # Bug 4 fix: only generate synthetic after 2000 diffusion updates
             diffusion_ready = self.diffusion_updates > 2000
             n_syn = int(BATCH_SIZE * REPLAY_RATIO) if diffusion_ready else 0
-            n_rare_sac = int(BATCH_SIZE * RARE_BATCH_RATIO) if len(self.rare_buffer) > 0 else 0
-            n_real = BATCH_SIZE - n_syn - n_rare_sac
+            n_rare_sac = min(int(BATCH_SIZE * RARE_BATCH_RATIO), len(self.rare_buffer))
+            n_reward_sac = min(int(BATCH_SIZE * HIGH_REWARD_BATCH_RATIO), len(self.high_reward_buffer))
+            n_real = BATCH_SIZE - n_syn - n_rare_sac - n_reward_sac
 
             real_s, real_a, real_r, real_c, real_ns, real_d = self.buffer.sample(n_real)
 
-            # Start building the batch components
-            parts_s  = [real_s]
-            parts_a  = [real_a]
-            parts_r  = [real_r]
-            parts_c  = [real_c]
+            parts_s = [real_s]
+            parts_a = [real_a]
+            parts_r = [real_r]
+            parts_c = [real_c]
             parts_ns = [real_ns]
-            parts_d  = [real_d]
+            parts_d = [real_d]
 
             if n_syn > 0:
                 syn_s, syn_a, syn_r, syn_c, syn_ns, syn_d = self._generate_synthetic(n_syn, scores_np)
@@ -702,7 +701,6 @@ class SACPGRMemoryAgent(SACPGRAgent):
                 parts_ns.append(syn_ns)
                 parts_d.append(syn_d)
 
-            # Inject rare transitions directly into SAC batch
             if n_rare_sac > 0:
                 rare_sample = self.rare_buffer.sample(n_rare_sac)
                 if rare_sample is not None:
@@ -714,12 +712,23 @@ class SACPGRMemoryAgent(SACPGRAgent):
                     parts_ns.append(rns)
                     parts_d.append(rd)
 
-            states      = torch.cat(parts_s)
-            actions     = torch.cat(parts_a)
-            rewards     = torch.cat(parts_r)
-            costs       = torch.cat(parts_c)
+            if n_reward_sac > 0:
+                reward_sample = self.high_reward_buffer.sample(n_reward_sac)
+                if reward_sample is not None:
+                    hs, ha, hr, hc, hns, hd = reward_sample
+                    parts_s.append(hs)
+                    parts_a.append(ha)
+                    parts_r.append(hr)
+                    parts_c.append(hc)
+                    parts_ns.append(hns)
+                    parts_d.append(hd)
+
+            states = torch.cat(parts_s)
+            actions = torch.cat(parts_a)
+            rewards = torch.cat(parts_r)
+            costs = torch.cat(parts_c)
             next_states = torch.cat(parts_ns)
-            dones       = torch.cat(parts_d)
+            dones = torch.cat(parts_d)
         else:
             states, actions, rewards, costs, next_states, dones = self.buffer.sample(BATCH_SIZE)
 
@@ -735,48 +744,63 @@ class SACPGRMemoryAgent(SACPGRAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class SACMemoryAgent(SACAgent):
-    """SAC + direct rare-event injection (no diffusion, no ICM).
-
-    Ablation baseline: injects raw hazard transitions into the SAC batch.
-    Tests whether the diffusion model is necessary, or if simple replay
-    of rare events is sufficient.
-    """
+    """SAC + direct hazard/reward memory injection (no diffusion, no ICM)."""
 
     def __init__(self, state_dim: int, action_dim: int):
         super().__init__(state_dim, action_dim)
         self.rare_buffer = RareEventBuffer(state_dim, action_dim)
+        self.high_reward_buffer = HighRewardBuffer(state_dim, action_dim)
 
     def add_transition(self, s, a, r, c, ns, d):
         self.buffer.add(s, a, r, c, ns, d)
         if c > 0:
             self.rare_buffer.add(s, a, r, c, ns, d)
+        self.high_reward_buffer.add(s, a, r, c, ns, d)
 
     def train_step(self):
+        """Assemble one replay batch from real, hazard-memory, and reward-memory data."""
         if len(self.buffer) < BATCH_SIZE:
             return
 
-        n_rare = int(BATCH_SIZE * RARE_BATCH_RATIO) if len(self.rare_buffer) > 0 else 0
-        n_real = BATCH_SIZE - n_rare
+        n_rare = min(int(BATCH_SIZE * RARE_BATCH_RATIO), len(self.rare_buffer))
+        n_reward = min(int(BATCH_SIZE * HIGH_REWARD_BATCH_RATIO), len(self.high_reward_buffer))
+        n_real = BATCH_SIZE - n_rare - n_reward
 
         real_s, real_a, real_r, real_c, real_ns, real_d = self.buffer.sample(n_real)
+        parts_s = [real_s]
+        parts_a = [real_a]
+        parts_r = [real_r]
+        parts_c = [real_c]
+        parts_ns = [real_ns]
+        parts_d = [real_d]
 
         if n_rare > 0:
             rare_sample = self.rare_buffer.sample(n_rare)
             if rare_sample is not None:
                 rs, ra, rr, rc, rns, rd = rare_sample
-                states      = torch.cat([real_s, rs])
-                actions     = torch.cat([real_a, ra])
-                rewards     = torch.cat([real_r, rr])
-                costs       = torch.cat([real_c, rc])
-                next_states = torch.cat([real_ns, rns])
-                dones       = torch.cat([real_d, rd])
-            else:
-                states, actions, rewards, costs, next_states, dones = (
-                    real_s, real_a, real_r, real_c, real_ns, real_d
-                )
-        else:
-            states, actions, rewards, costs, next_states, dones = (
-                real_s, real_a, real_r, real_c, real_ns, real_d
-            )
+                parts_s.append(rs)
+                parts_a.append(ra)
+                parts_r.append(rr)
+                parts_c.append(rc)
+                parts_ns.append(rns)
+                parts_d.append(rd)
+
+        if n_reward > 0:
+            reward_sample = self.high_reward_buffer.sample(n_reward)
+            if reward_sample is not None:
+                hs, ha, hr, hc, hns, hd = reward_sample
+                parts_s.append(hs)
+                parts_a.append(ha)
+                parts_r.append(hr)
+                parts_c.append(hc)
+                parts_ns.append(hns)
+                parts_d.append(hd)
+
+        states = torch.cat(parts_s)
+        actions = torch.cat(parts_a)
+        rewards = torch.cat(parts_r)
+        costs = torch.cat(parts_c)
+        next_states = torch.cat(parts_ns)
+        dones = torch.cat(parts_d)
 
         self._sac_update(states, actions, rewards, costs, next_states, dones)

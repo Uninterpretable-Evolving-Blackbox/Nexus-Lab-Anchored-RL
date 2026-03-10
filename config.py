@@ -61,6 +61,9 @@ RARE_BUFFER_SIZE = 500    # max catastrophic transitions to remember
 RARE_BATCH_RATIO = 0.2    # fraction of each diffusion training batch drawn
                           # from the rare buffer (0.2 = 20% rare, 80% normal)
 RARE_WEIGHT = 5.0         # loss weight multiplier — rare transitions contribute
+HIGH_REWARD_BUFFER_SIZE = 500
+HIGH_REWARD_BATCH_RATIO = 0.1
+HIGH_REWARD_WEIGHT = 3.0  # reward-memory transitions get a smaller boost than hazards
                           # 5x more to the diffusion loss, forcing the model
                           # to learn them more thoroughly
 

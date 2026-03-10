@@ -1,17 +1,18 @@
 """
-Replay buffers: standard uniform replay and rare-event memory bank.
+Replay buffers for standard replay plus safety and motivation memories.
 
 In RL, we store past experience and re-sample it for training. This file
-has two buffers:
+defines:
   1. ReplayBuffer     — standard ring buffer, stores everything uniformly
   2. RareEventBuffer  — small separate store for catastrophic (cost>0) transitions
+  3. HighRewardBuffer â€” small separate store for top-reward transitions
 """
 
 import random
 import numpy as np
 import torch
 
-from config import BUFFER_SIZE, RARE_BUFFER_SIZE, DEVICE
+from config import BUFFER_SIZE, RARE_BUFFER_SIZE, HIGH_REWARD_BUFFER_SIZE, DEVICE
 
 
 class ReplayBuffer:
@@ -193,3 +194,28 @@ class RareEventBuffer:
 
     def __len__(self):
         return len(self.buffer)
+
+
+class HighRewardBuffer(RareEventBuffer):
+    """Memory bank that keeps the highest-reward transitions seen so far."""
+
+    def __init__(self, state_dim: int, action_dim: int, max_size: int = HIGH_REWARD_BUFFER_SIZE):
+        super().__init__(state_dim, action_dim, max_size=max_size)
+
+    def add(self, state, action, reward, cost, next_state, done):
+        transition = {
+            "state": np.array(state, dtype=np.float32),
+            "action": np.array(action, dtype=np.float32),
+            "reward": float(reward),
+            "cost": float(cost),
+            "next_state": np.array(next_state, dtype=np.float32),
+            "done": float(done),
+        }
+
+        if len(self.buffer) < self.max_size:
+            self.buffer.append(transition)
+            return
+
+        min_idx = min(range(len(self.buffer)), key=lambda i: self.buffer[i]["reward"])
+        if reward > self.buffer[min_idx]["reward"]:
+            self.buffer[min_idx] = transition
