@@ -17,6 +17,8 @@ Three agents, each building on the last:
                           OUR contribution — preventing forgetting of catastrophic
                           events that the curiosity signal would otherwise
                           deprioritize once they become "familiar."
+
+  4. SACMemoryAgent  — Direct rare / salience memory injection. Direct replay of important memories
 """
 
 import numpy as np
@@ -245,7 +247,7 @@ class SACAgent:
         cost-penalized SAC objective.
         """
         with torch.no_grad():
-            effective_rewards = rewards - self.lam * costs
+            effective_rewards = rewards - self.lam * costs 
             next_actions, next_log_probs = self.policy.sample(next_states)
             target_q = torch.min(
                 self.q1_target(next_states, next_actions),
@@ -255,8 +257,7 @@ class SACAgent:
                 target_q - self.alpha * next_log_probs
             )
             q_pred = torch.min(self.q1(states, actions), self.q2(states, actions))
-            return (target - q_pred).abs().squeeze(1)
-
+            return (target - q_pred).abs().squeeze(1) 
     def _update_salience_buffer(self, states, actions, rewards, costs, next_states, dones):
         """Insert a scored batch into the salience buffer using TD-error magnitude."""
         if not hasattr(self, "salience_buffer"):
@@ -602,6 +603,7 @@ class SACPGRAgent(SACAgent):
                 syn_s, syn_a, syn_r, syn_c, syn_ns, syn_d = self._generate_synthetic(n_syn, scores_np)
                 # Fill the rest of the batch with real data
                 real_s, real_a, real_r, real_c, real_ns, real_d = self.buffer.sample(BATCH_SIZE - n_syn)
+                self._update_salience_buffer(real_s, real_a, real_r, real_c, real_ns, real_d)
                 # Concatenate real + synthetic
                 states      = torch.cat([real_s, syn_s])
                 actions     = torch.cat([real_a, syn_a])
@@ -791,29 +793,37 @@ class SACPGRMemoryAgent(SACPGRAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class SACMemoryAgent(SACAgent):
-    """SAC + direct hazard/reward memory injection (no diffusion, no ICM)."""
+    """SAC + direct rare/salience memory injection (no diffusion, no ICM).
+
+    Ablation baseline: injects raw hazard and salience transitions directly
+    into the SAC batch. Tests whether the diffusion model is necessary, or
+    if simple replay of important memories is sufficient.
+    """
 
     def __init__(self, state_dim: int, action_dim: int):
         super().__init__(state_dim, action_dim)
         self.rare_buffer = RareEventBuffer(state_dim, action_dim)
-        self.high_reward_buffer = HighRewardBuffer(state_dim, action_dim)
+        self.salience_buffer = SalienceBuffer(state_dim, action_dim)
+        self.high_reward_buffer = self.salience_buffer  # backwards-compatible alias
 
     def add_transition(self, s, a, r, c, ns, d):
         self.buffer.add(s, a, r, c, ns, d)
         if c > 0:
             self.rare_buffer.add(s, a, r, c, ns, d)
-        self.high_reward_buffer.add(s, a, r, c, ns, d, float(r))
 
     def train_step(self):
-        """Assemble one replay batch from real, hazard-memory, and reward-memory data."""
         if len(self.buffer) < BATCH_SIZE:
             return
 
         n_rare = min(int(BATCH_SIZE * RARE_BATCH_RATIO), len(self.rare_buffer))
-        n_reward = min(int(BATCH_SIZE * HIGH_REWARD_BATCH_RATIO), len(self.high_reward_buffer))
-        n_real = max(0, BATCH_SIZE - n_rare - n_reward)
+        n_salience = min(int(BATCH_SIZE * SALIENCE_BATCH_RATIO), len(self.salience_buffer))
+        n_real = max(0, BATCH_SIZE - n_rare - n_salience)
 
         real_s, real_a, real_r, real_c, real_ns, real_d = self.buffer.sample(n_real)
+
+        # Update salience memory from the current real replay batch
+        self._update_salience_buffer(real_s, real_a, real_r, real_c, real_ns, real_d)
+
         parts_s = [real_s]
         parts_a = [real_a]
         parts_r = [real_r]
@@ -832,10 +842,10 @@ class SACMemoryAgent(SACAgent):
                 parts_ns.append(rns)
                 parts_d.append(rd)
 
-        if n_reward > 0:
-            reward_sample = self.high_reward_buffer.sample(n_reward)
-            if reward_sample is not None:
-                hs, ha, hr, hc, hns, hd = reward_sample
+        if n_salience > 0:
+            salience_sample = self.salience_buffer.sample(n_salience)
+            if salience_sample is not None:
+                hs, ha, hr, hc, hns, hd = salience_sample
                 parts_s.append(hs)
                 parts_a.append(ha)
                 parts_r.append(hr)

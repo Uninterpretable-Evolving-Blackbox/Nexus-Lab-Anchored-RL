@@ -5,7 +5,7 @@ In RL, we store past experience and re-sample it for training. This file
 defines:
   1. ReplayBuffer     — standard ring buffer, stores everything uniformly
   2. RareEventBuffer  — small separate store for catastrophic (cost>0) transitions
-  3. SalienceBuffer   â€” small separate store for high-TD-error transitions
+  3. SalienceBuffer   — small separate store for high-TD-error transitions
 """
 
 import random
