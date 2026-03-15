@@ -58,14 +58,18 @@ CFG_GUIDANCE_SCALE = 2.0  # omega: how strongly to steer toward the condition
 # This is OUR contribution: a small separate buffer that stores hazardous
 # transitions so the diffusion model never forgets them.
 RARE_BUFFER_SIZE = 500    # max catastrophic transitions to remember
-RARE_BATCH_RATIO = 0.2    # fraction of each diffusion training batch drawn
+RARE_BATCH_RATIO = 0.2    # fraction of each diffusion training batch drawn / how often each memory is replayed
                           # from the rare buffer (0.2 = 20% rare, 80% normal)
-RARE_WEIGHT = 5.0         # loss weight multiplier — rare transitions contribute
-HIGH_REWARD_BUFFER_SIZE = 500
-HIGH_REWARD_BATCH_RATIO = 0.1
-HIGH_REWARD_WEIGHT = 3.0  # reward-memory transitions get a smaller boost than hazards
-                          # 5x more to the diffusion loss, forcing the model
-                          # to learn them more thoroughly
+RARE_WEIGHT = 5.0         # loss weight multiplier — rare transitions contribute / how strongly it affects diffusion learning
+SALIENCE_BUFFER_SIZE = 500
+SALIENCE_BATCH_RATIO = 0.05
+SALIENCE_WEIGHT = 2.0     # salience-memory transitions get a smaller boost than hazards
+                          # but are still replayed often enough to shape motivation
+
+# Backwards-compatible aliases while the rest of the codebase migrates.
+HIGH_REWARD_BUFFER_SIZE = SALIENCE_BUFFER_SIZE
+HIGH_REWARD_BATCH_RATIO = SALIENCE_BATCH_RATIO
+HIGH_REWARD_WEIGHT = SALIENCE_WEIGHT
 
 # ── Cost constraint (Lagrangian) ────────────────────────────────────────────
 # This is what makes agents actually AVOID hazards. Without this, the policy

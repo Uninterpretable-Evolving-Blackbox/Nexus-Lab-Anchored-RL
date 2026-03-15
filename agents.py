@@ -28,11 +28,12 @@ from config import (
     DEVICE, LR, GAMMA, TAU, BATCH_SIZE,
     LATENT_DIM, REPLAY_RATIO, PGR_START_BUFFER,
     RARE_BATCH_RATIO, RARE_WEIGHT,
-    HIGH_REWARD_BATCH_RATIO, HIGH_REWARD_WEIGHT,
+    HIGH_REWARD_BATCH_RATIO,
+    SALIENCE_BATCH_RATIO, SALIENCE_WEIGHT,
     CFG_P_UNCOND, CFG_GUIDANCE_SCALE,
     COST_LIMIT, LAMBDA_LR, LAMBDA_INIT,
 )
-from buffers import ReplayBuffer, RareEventBuffer, HighRewardBuffer
+from buffers import ReplayBuffer, RareEventBuffer, SalienceBuffer, HighRewardBuffer
 from networks import (
     QNetwork, GaussianPolicy,
     StateEncoder, ForwardModel,
@@ -237,6 +238,51 @@ class SACAgent:
 
         # Slowly update target networks
         self._soft_update()
+
+    def _compute_td_error(self, states, actions, rewards, costs, next_states, dones):
+        """
+        Compute a salience score based on critic surprise under the current
+        cost-penalized SAC objective.
+        """
+        with torch.no_grad():
+            effective_rewards = rewards - self.lam * costs
+            next_actions, next_log_probs = self.policy.sample(next_states)
+            target_q = torch.min(
+                self.q1_target(next_states, next_actions),
+                self.q2_target(next_states, next_actions),
+            )
+            target = effective_rewards.unsqueeze(1) + GAMMA * (1 - dones.unsqueeze(1)) * (
+                target_q - self.alpha * next_log_probs
+            )
+            q_pred = torch.min(self.q1(states, actions), self.q2(states, actions))
+            return (target - q_pred).abs().squeeze(1)
+
+    def _update_salience_buffer(self, states, actions, rewards, costs, next_states, dones):
+        """Insert a scored batch into the salience buffer using TD-error magnitude."""
+        if not hasattr(self, "salience_buffer"):
+            return
+
+        salience = self._compute_td_error(states, actions, rewards, costs, next_states, dones)
+        salience_np = salience.detach().cpu().numpy()
+        order = np.argsort(salience_np)[::-1]
+
+        states_np = states.detach().cpu().numpy()
+        actions_np = actions.detach().cpu().numpy()
+        rewards_np = rewards.detach().cpu().numpy()
+        costs_np = costs.detach().cpu().numpy()
+        next_states_np = next_states.detach().cpu().numpy()
+        dones_np = dones.detach().cpu().numpy()
+
+        for i in order:
+            self.salience_buffer.add(
+                states_np[i],
+                actions_np[i],
+                rewards_np[i],
+                costs_np[i],
+                next_states_np[i],
+                dones_np[i],
+                salience_np[i],
+            )
 
     def record_episode_cost(self, episode_cost):
         """
@@ -589,36 +635,36 @@ class SACPGRAgent(SACAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class SACPGRMemoryAgent(SACPGRAgent):
-    """PGR + hazard memory + high-reward memory."""
+    """PGR + hazard memory + salience memory."""
 
     def __init__(self, state_dim: int, action_dim: int):
         super().__init__(state_dim, action_dim)
         # Dedicated buffers for aversive and motivationally salient transitions.
         self.rare_buffer = RareEventBuffer(state_dim, action_dim)
-        self.high_reward_buffer = HighRewardBuffer(state_dim, action_dim)
+        self.salience_buffer = SalienceBuffer(state_dim, action_dim)
+        self.high_reward_buffer = self.salience_buffer
 
     def add_transition(self, s, a, r, c, ns, d):
         """
-        Store transition in main replay, hazard memory, and reward memory.
-        Hazard memory only keeps costly transitions; reward memory keeps the
-        best-rewarded transitions regardless of cost.
+        Store transition in main replay and hazard memory.
+
+        Salience memory is populated during train_step() from critic TD error.
         """
         self.buffer.add(s, a, r, c, ns, d)
         if c > 0:   # this transition hit a hazard!
             self.rare_buffer.add(s, a, r, c, ns, d)
-        self.high_reward_buffer.add(s, a, r, c, ns, d)
 
     def train_step(self):
         """
         Train with one mixed-replay path.
 
         Level 1 — Diffusion training (same as before):
-        Diffusion sees normal replay plus hazard and high-reward memory
+        Diffusion sees normal replay plus hazard and salience memory
         samples.
 
         Level 2 — SAC policy training (NEW — Fix 3):
         SAC then updates once from a batch assembled from real replay,
-        optional synthetic replay, hazard memory, and reward memory.
+        optional synthetic replay, hazard memory, and salience memory.
         """
         if len(self.buffer) < BATCH_SIZE:
             return
@@ -631,6 +677,7 @@ class SACPGRMemoryAgent(SACPGRAgent):
                 min(5000, len(self.buffer))
             )
             scores_np = normalize_scores(self._compute_curiosity(s, a, ns).cpu().numpy())
+            self._update_salience_buffer(s, a, r, c, ns, d)
 
             pool_trans = self.buffer.get_transitions(idx)
             self.trans_mean = torch.FloatTensor(pool_trans.mean(axis=0)).to(DEVICE)
@@ -644,14 +691,14 @@ class SACPGRMemoryAgent(SACPGRAgent):
 
             # ── Level 1: Diffusion training with rare-event injection ────
             n_rare_diff = min(int(BATCH_SIZE * RARE_BATCH_RATIO), len(self.rare_buffer))
-            n_reward_diff = min(int(BATCH_SIZE * HIGH_REWARD_BATCH_RATIO), len(self.high_reward_buffer))
-            n_normal = BATCH_SIZE - n_rare_diff - n_reward_diff
+            n_salience_diff = min(int(BATCH_SIZE * SALIENCE_BATCH_RATIO), len(self.salience_buffer))
+            n_normal = max(0, BATCH_SIZE - n_rare_diff - n_salience_diff)
 
             batch_idx = np.random.choice(len(idx), n_normal, replace=True)
             normal_trans = self.buffer.get_transitions(idx[batch_idx])
             normal_scores = scores_np[batch_idx]
             normal_weights = np.ones(n_normal)
-            reward_prompt = np.quantile(scores_np, 0.75)
+            salience_prompt = np.quantile(scores_np, 0.75)
             all_trans, all_scores, all_weights = normal_trans, normal_scores, normal_weights
 
             if n_rare_diff > 0:
@@ -663,14 +710,14 @@ class SACPGRMemoryAgent(SACPGRAgent):
                     all_scores = np.concatenate([all_scores, rare_scores])
                     all_weights = np.concatenate([all_weights, rare_weights])
 
-            if n_reward_diff > 0:
-                reward_trans = self.high_reward_buffer.get_transitions(n_reward_diff)
-                if reward_trans is not None:
-                    reward_scores = np.ones(len(reward_trans)) * reward_prompt
-                    reward_weights = np.ones(len(reward_trans)) * HIGH_REWARD_WEIGHT
-                    all_trans = np.vstack([all_trans, reward_trans])
-                    all_scores = np.concatenate([all_scores, reward_scores])
-                    all_weights = np.concatenate([all_weights, reward_weights])
+            if n_salience_diff > 0:
+                salience_trans = self.salience_buffer.get_transitions(n_salience_diff)
+                if salience_trans is not None:
+                    salience_scores = np.ones(len(salience_trans)) * salience_prompt
+                    salience_weights = np.ones(len(salience_trans)) * SALIENCE_WEIGHT
+                    all_trans = np.vstack([all_trans, salience_trans])
+                    all_scores = np.concatenate([all_scores, salience_scores])
+                    all_weights = np.concatenate([all_weights, salience_weights])
 
             all_weights = all_weights / all_weights.mean()
             self._train_diffusion(all_trans, all_scores, all_weights)
@@ -680,8 +727,8 @@ class SACPGRMemoryAgent(SACPGRAgent):
             diffusion_ready = self.diffusion_updates > 2000
             n_syn = int(BATCH_SIZE * REPLAY_RATIO) if diffusion_ready else 0
             n_rare_sac = min(int(BATCH_SIZE * RARE_BATCH_RATIO), len(self.rare_buffer))
-            n_reward_sac = min(int(BATCH_SIZE * HIGH_REWARD_BATCH_RATIO), len(self.high_reward_buffer))
-            n_real = BATCH_SIZE - n_syn - n_rare_sac - n_reward_sac
+            n_salience_sac = min(int(BATCH_SIZE * SALIENCE_BATCH_RATIO), len(self.salience_buffer))
+            n_real = max(0, BATCH_SIZE - n_syn - n_rare_sac - n_salience_sac)
 
             real_s, real_a, real_r, real_c, real_ns, real_d = self.buffer.sample(n_real)
 
@@ -712,10 +759,10 @@ class SACPGRMemoryAgent(SACPGRAgent):
                     parts_ns.append(rns)
                     parts_d.append(rd)
 
-            if n_reward_sac > 0:
-                reward_sample = self.high_reward_buffer.sample(n_reward_sac)
-                if reward_sample is not None:
-                    hs, ha, hr, hc, hns, hd = reward_sample
+            if n_salience_sac > 0:
+                salience_sample = self.salience_buffer.sample(n_salience_sac)
+                if salience_sample is not None:
+                    hs, ha, hr, hc, hns, hd = salience_sample
                     parts_s.append(hs)
                     parts_a.append(ha)
                     parts_r.append(hr)
@@ -755,7 +802,7 @@ class SACMemoryAgent(SACAgent):
         self.buffer.add(s, a, r, c, ns, d)
         if c > 0:
             self.rare_buffer.add(s, a, r, c, ns, d)
-        self.high_reward_buffer.add(s, a, r, c, ns, d)
+        self.high_reward_buffer.add(s, a, r, c, ns, d, float(r))
 
     def train_step(self):
         """Assemble one replay batch from real, hazard-memory, and reward-memory data."""
@@ -764,7 +811,7 @@ class SACMemoryAgent(SACAgent):
 
         n_rare = min(int(BATCH_SIZE * RARE_BATCH_RATIO), len(self.rare_buffer))
         n_reward = min(int(BATCH_SIZE * HIGH_REWARD_BATCH_RATIO), len(self.high_reward_buffer))
-        n_real = BATCH_SIZE - n_rare - n_reward
+        n_real = max(0, BATCH_SIZE - n_rare - n_reward)
 
         real_s, real_a, real_r, real_c, real_ns, real_d = self.buffer.sample(n_real)
         parts_s = [real_s]

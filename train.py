@@ -89,6 +89,122 @@ def train_agent(agent, env, n_episodes: int, label: str, updates_per_episode: in
 
     return rewards, costs
 
+def aggregate_multiseed_for_dashboard(results):
+    """Convert multi-seed results into mean curves so the old plot_results() works."""
+    aggregated = {}
+
+    for method, seed_runs in results.items():
+        if not seed_runs:
+            continue
+
+        reward_runs = [np.array(run["rewards"]) for run in seed_runs.values()]
+        cost_runs = [np.array(run["costs"]) for run in seed_runs.values()]
+
+        min_len = min(len(r) for r in reward_runs)
+
+        reward_runs = np.array([r[:min_len] for r in reward_runs])
+        cost_runs = np.array([c[:min_len] for c in cost_runs])
+
+        aggregated[method] = {
+            "rewards": reward_runs.mean(axis=0).tolist(),
+            "costs": cost_runs.mean(axis=0).tolist(),
+            "total_cost": float(np.mean([run["total_cost"] for run in seed_runs.values()])),
+        }
+
+    return aggregated
+
+def plot_dashboard(results: dict, save_path: str = "hazard_cheetah_experiment.png"):
+    """
+    Generate a 2×2 figure comparing all methods:
+      - Top left:     smoothed rewards over episodes
+      - Top right:    smoothed costs over episodes (lower = safer)
+      - Bottom left:  cumulative cost (lower = safer overall)
+      - Bottom right: bar chart of total cost vs avg reward
+
+    Args:
+        results: dict mapping method_name → {"rewards": [...], "costs": [...], ...}
+        save_path: where to save the PNG
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # non-interactive backend (works on servers)
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not available — skipping plot")
+        return
+
+    # Color scheme for each method
+    colors = {
+        "SAC": "#ff7f0e", "PGR": "#1f77b4", "PGR+Memory": "#2ca02c",
+    }
+    # Fallback colors for any custom method names
+    default_colors = ["#d62728", "#9467bd", "#8c564b", "#e377c2"]
+    for i, name in enumerate(results):
+        if name not in colors:
+            colors[name] = default_colors[i % len(default_colors)]
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # ── Top left: smoothed rewards ───────────────────────────────────────
+    ax = axes[0, 0]
+    for name, data in results.items():
+        # Moving average with window of 25 episodes
+        sm = np.convolve(data["rewards"], np.ones(25) / 25, mode="valid")
+        ax.plot(sm, label=name, color=colors.get(name, None), linewidth=2)
+    ax.set_title("Episode Rewards (smoothed)")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Reward")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # ── Top right: smoothed costs ────────────────────────────────────────
+    ax = axes[0, 1]
+    for name, data in results.items():
+        sm = np.convolve(data["costs"], np.ones(25) / 25, mode="valid")
+        ax.plot(sm, label=name, color=colors.get(name, None), linewidth=2)
+    ax.set_title("Episode Costs (smoothed) — LOWER IS SAFER")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Cost (hazard hits)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # ── Bottom left: cumulative cost ─────────────────────────────────────
+    ax = axes[1, 0]
+    for name, data in results.items():
+        ax.plot(np.cumsum(data["costs"]), label=name, color=colors.get(name, None), linewidth=2)
+    ax.set_title("Cumulative Cost — LOWER IS SAFER")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Total Cost")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # ── Bottom right: bar chart summary ──────────────────────────────────
+    ax = axes[1, 1]
+    names = list(results.keys())
+    x = np.arange(len(names))
+    total_costs = [results[n]["total_cost"] for n in names]
+    avg_rewards = [np.mean(results[n]["rewards"]) for n in names]
+
+    # Two y-axes: cost (red, left) and reward (green, right)
+    ax2 = ax.twinx()
+    bars1 = ax.bar(x - 0.2, total_costs, 0.4, label="Total Cost", color="red", alpha=0.7)
+    bars2 = ax2.bar(x + 0.2, avg_rewards, 0.4, label="Avg Reward", color="green", alpha=0.7)
+    ax.set_ylabel("Total Cost (↓ safer)", color="red")
+    ax2.set_ylabel("Avg Reward (↑ better)", color="green")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names)
+    ax.set_title("Safety vs Performance")
+
+    # Label the bars with values
+    for bar, val in zip(bars1, total_costs):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2, bar.get_height(),
+            f"{val:.0f}", ha="center", va="bottom", fontsize=10, color="red",
+        )
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    print(f"\nPlot saved → {save_path}")
 
 def plot_results(results: dict, save_path: str = "hazard_cheetah_experiment.png"):
     """

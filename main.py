@@ -26,7 +26,7 @@ import torch
 from config import DEVICE, N_EPISODES, MAX_STEPS, UPDATES_PER_EPISODE
 from envs import HazardHalfCheetah, HazardAnt, PointHazardEnv
 from agents import SACAgent, SACPGRAgent, SACPGRMemoryAgent, SACMemoryAgent
-from train import train_agent
+from train import train_agent, plot_dashboard, aggregate_multiseed_for_dashboard, plot_results
 
 ENV_REGISTRY = {
     "point": PointHazardEnv,
@@ -214,6 +214,8 @@ def run_experiment(env_name, n_episodes, methods, seeds):
 
     print_multiseed_summary(results, n_episodes)
     plot_multiseed(results, save_path=f"publication_{env_name}.png")
+    dashboard_results = aggregate_multiseed_for_dashboard(results)
+    plot_dashboard(dashboard_results, save_path=f"dashboard_{env_name}.png")
 
     return results
 
