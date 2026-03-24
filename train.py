@@ -136,6 +136,7 @@ def plot_dashboard(results: dict, save_path: str = "hazard_cheetah_experiment.pn
     # Color scheme for each method
     colors = {
         "SAC": "#ff7f0e", "PGR": "#1f77b4", "PGR+Memory": "#2ca02c",
+        "PGR+Memory+Reward": "#8c564b",
     }
     # Fallback colors for any custom method names
     default_colors = ["#d62728", "#9467bd", "#8c564b", "#e377c2"]
@@ -229,6 +230,7 @@ def plot_results(results: dict, save_path: str = "hazard_cheetah_experiment.png"
     # Color scheme for each method
     colors = {
         "SAC": "#ff7f0e", "PGR": "#1f77b4", "PGR+Memory": "#2ca02c",
+        "PGR+Memory+Reward": "#8c564b",
     }
     # Fallback colors for any custom method names
     default_colors = ["#d62728", "#9467bd", "#8c564b", "#e377c2"]

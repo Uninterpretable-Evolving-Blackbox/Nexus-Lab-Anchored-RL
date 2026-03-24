@@ -17,7 +17,7 @@ SEED = 42
 
 # ── Environment ──────────────────────────────────────────────────────────────
 MAX_STEPS = 200         # max steps per episode (point env is small, 200 is plenty)
-N_EPISODES = 3000       # total training episodes
+N_EPISODES = 200       # total training episodes
 
 # ── Networks ─────────────────────────────────────────────────────────────────
 HIDDEN_DIM = 128        # width of hidden layers (128 is enough for 6D state)
@@ -27,7 +27,7 @@ TAU = 0.005            # soft-update rate for target Q-networks
                        # (each step: target = TAU*online + (1-TAU)*target)
 
 # ── Replay buffer ────────────────────────────────────────────────────────────
-BATCH_SIZE = 128        # transitions per gradient step
+BATCH_SIZE = 64        # transitions per gradient step
 BUFFER_SIZE = 30_000    # max transitions stored in the main replay buffer
 
 # ── PGR / Diffusion ─────────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ LATENT_DIM = 32         # dimensionality of the ICM latent space
 REPLAY_RATIO = 0.3      # fraction of each training batch that is synthetic
                         # (0.3 = 30% generated, 70% real transitions)
 UPDATES_PER_EPISODE = 8 # gradient steps per environment episode
-PGR_START_BUFFER = 2_000  # don't start generating until we have this many
+PGR_START_BUFFER = 200  # don't start generating until we have this many
                           # real transitions (need enough data to train diffusion)
 
 # Classifier-Free Guidance (CFG) — this is what makes conditioning work.
@@ -58,18 +58,20 @@ CFG_GUIDANCE_SCALE = 2.0  # omega: how strongly to steer toward the condition
 # This is OUR contribution: a small separate buffer that stores hazardous
 # transitions so the diffusion model never forgets them.
 RARE_BUFFER_SIZE = 500    # max catastrophic transitions to remember
-RARE_BATCH_RATIO = 0.2    # fraction of each diffusion training batch drawn / how often each memory is replayed
+RARE_BATCH_RATIO = 0.1    # fraction of each diffusion training batch drawn / how often each memory is replayed
                           # from the rare buffer (0.2 = 20% rare, 80% normal)
-RARE_WEIGHT = 5.0         # loss weight multiplier — rare transitions contribute / how strongly it affects diffusion learning
+RARE_WEIGHT = 3.0         # loss weight multiplier — rare transitions contribute / how strongly it affects diffusion learning
 SALIENCE_BUFFER_SIZE = 500
-SALIENCE_BATCH_RATIO = 0.05
-SALIENCE_WEIGHT = 2.0     # salience-memory transitions get a smaller boost than hazards
+SALIENCE_BATCH_RATIO = 0.1
+SALIENCE_WEIGHT = 3.0     # salience-memory transitions get a smaller boost than hazards
                           # but are still replayed often enough to shape motivation
 
-# Backwards-compatible aliases while the rest of the codebase migrates.
-HIGH_REWARD_BUFFER_SIZE = SALIENCE_BUFFER_SIZE
-HIGH_REWARD_BATCH_RATIO = SALIENCE_BATCH_RATIO
-HIGH_REWARD_WEIGHT = SALIENCE_WEIGHT
+# High-reward memory is separate from salience memory:
+# it stores genuinely good outcomes by reward, not critic TD error.
+HIGH_REWARD_BUFFER_SIZE = 500
+HIGH_REWARD_BATCH_RATIO = 0.1
+HIGH_REWARD_WEIGHT = 2.0
+HIGH_REWARD_THRESHOLD = 1.0
 
 # ── Cost constraint (Lagrangian) ────────────────────────────────────────────
 # This is what makes agents actually AVOID hazards. Without this, the policy

@@ -35,7 +35,7 @@ from config import (
     CFG_P_UNCOND, CFG_GUIDANCE_SCALE,
     COST_LIMIT, LAMBDA_LR, LAMBDA_INIT,
 )
-from buffers import ReplayBuffer, RareEventBuffer, SalienceBuffer, HighRewardBuffer
+from buffers import ReplayBuffer, RareEventBuffer, SalienceBuffer
 from networks import (
     QNetwork, GaussianPolicy,
     StateEncoder, ForwardModel,
@@ -258,6 +258,7 @@ class SACAgent:
             )
             q_pred = torch.min(self.q1(states, actions), self.q2(states, actions))
             return (target - q_pred).abs().squeeze(1) 
+        
     def _update_salience_buffer(self, states, actions, rewards, costs, next_states, dones):
         """Insert a scored batch into the salience buffer using TD-error magnitude."""
         if not hasattr(self, "salience_buffer"):

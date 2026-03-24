@@ -18,14 +18,13 @@ import json
 import random
 import time
 
-import torch
-
 import numpy as np
 import torch
 
 from config import DEVICE, N_EPISODES, MAX_STEPS, UPDATES_PER_EPISODE
 from envs import HazardHalfCheetah, HazardAnt, PointHazardEnv
 from agents import SACAgent, SACPGRAgent, SACPGRMemoryAgent, SACMemoryAgent
+from sac_pgr_memory_reward_agent import SACPGRMemoryRewardAgent
 from train import train_agent, plot_dashboard, aggregate_multiseed_for_dashboard, plot_results
 
 ENV_REGISTRY = {
@@ -35,10 +34,8 @@ ENV_REGISTRY = {
 }
 
 AGENT_REGISTRY = {
-    "SAC": SACAgent,
-    "SAC+Memory": SACMemoryAgent,       # ablation baseline
-    "PGR": SACPGRAgent,
     "PGR+Memory": SACPGRMemoryAgent,    # our contribution
+    "PGR+Memory+Reward": SACPGRMemoryRewardAgent,
 }
 
 
@@ -63,6 +60,7 @@ def plot_multiseed(results: dict, save_path: str):
         "SAC+Memory": "#d62728",
         "PGR": "#1f77b4",
         "PGR+Memory": "#2ca02c",
+        "PGR+Memory+Reward": "#8c564b",
     }
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -136,7 +134,7 @@ def print_multiseed_summary(results: dict, n_episodes: int):
         )
 
 
-def run_experiment(env_name, n_episodes, methods, seeds):
+def run_experiment(env_name, n_episodes, methods, seeds, overwrite_methods=False):
     EnvClass = ENV_REGISTRY[env_name]
 
     print("=" * 80)
@@ -147,7 +145,9 @@ def run_experiment(env_name, n_episodes, methods, seeds):
     print(f"Seeds:    {seeds}")
     print("=" * 80)
 
-    # results[method][seed] = {rewards, costs, total_cost}
+    # Keep the full results payload so we can preserve unrelated methods in the
+    # canonical results file while refreshing only the selected comparison set.
+    all_results = {}
     results = {m: {} for m in methods}
 
     # Try to resume from saved progress
@@ -155,15 +155,24 @@ def run_experiment(env_name, n_episodes, methods, seeds):
     try:
         with open(json_path) as f:
             saved = json.load(f)
+        if isinstance(saved, dict):
+            all_results = saved
         for m in methods:
-            if m in saved:
-                for seed_str, data in saved[m].items():
+            if overwrite_methods:
+                continue
+            if m in all_results:
+                for seed_str, data in all_results[m].items():
+                    if len(data.get("rewards", [])) != n_episodes or len(data.get("costs", [])) != n_episodes:
+                        continue
                     results[m][int(seed_str)] = data
         n_resumed = sum(len(v) for v in results.values())
         if n_resumed > 0:
             print(f"Resumed {n_resumed} completed runs from {json_path}")
     except (FileNotFoundError, json.JSONDecodeError):
         pass
+
+    for m in methods:
+        all_results[m] = results[m]
 
     total_runs = len(methods) * len(seeds)
     done_runs = sum(len(v) for v in results.values())
@@ -208,8 +217,9 @@ def run_experiment(env_name, n_episodes, methods, seeds):
             print(f"   Weights saved -> {weight_file}")
 
             # Save progress after every run (crash-safe)
+            all_results[name] = results[name]
             with open(json_path, "w") as f:
-                json.dump(results, f)
+                json.dump(all_results, f)
             print(f"   Progress saved -> {json_path}")
 
     print_multiseed_summary(results, n_episodes)
@@ -233,9 +243,13 @@ def main():
     parser.add_argument(
         "--seeds", nargs="+", type=int, default=[42, 123, 456],
     )
+    parser.add_argument(
+        "--overwrite-methods", action="store_true",
+        help="Discard any saved runs for the selected methods and rerun them from scratch.",
+    )
     args = parser.parse_args()
 
-    run_experiment(args.env, args.episodes, args.methods, args.seeds)
+    run_experiment(args.env, args.episodes, args.methods, args.seeds, overwrite_methods=args.overwrite_methods)
 
 
 if __name__ == "__main__":

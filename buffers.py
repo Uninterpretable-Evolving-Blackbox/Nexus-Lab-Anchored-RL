@@ -220,6 +220,3 @@ class SalienceBuffer(RareEventBuffer):
         min_idx = min(range(len(self.buffer)), key=lambda i: self.buffer[i]["salience"])
         if salience > self.buffer[min_idx]["salience"]:
             self.buffer[min_idx] = transition
-
-
-HighRewardBuffer = SalienceBuffer
