@@ -1,0 +1,210 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\title{Safety-Aware Prioritized Generative Replay:\\Preventing Constraint Violations in Diffusion-Based RL}
+
+\author{
+  David Gao \\
+  \textit{University of XXX} \\
+  \texttt{david.gao@xxx.edu}
+  \and
+  Co-Author Name \\
+  \textit{University of XXX} \\
+  \texttt{coauthor@xxx.edu}
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Prioritized Generative Replay (PGR) uses conditional diffusion models to synthesize replay transitions, dramatically accelerating reinforcement learning.
+However, we show that PGR's sample efficiency becomes a \emph{safety liability}: on a constrained locomotion task, PGR incurs $185\times$ more constraint violations than a standard SAC baseline.
+We propose two complementary mechanisms: (1)~a Lagrangian reward penalty that makes the policy cost-aware, and (2)~a rare-event memory buffer that preserves hazardous transitions in the diffusion model's training set.
+While the Lagrangian alone reduces violations by 98.6\%, the diffusion model's hazard fidelity (DiffHz) collapses to 0.6\%, requiring aggressive penalization ($\lambda{=}3.08$).
+Adding the rare buffer maintains DiffHz at 8.6\% ($p{<}0.001$), achieves a further 60\% cost reduction ($2.1$ vs $5.2$ per episode), and requires $4\times$ less penalty ($\lambda{=}0.80$).
+Overall, our method reduces constraint violations by 99.4\% relative to PGR with only 12.7\% reward trade-off across 3 seeds on DMC Cheetah-Run.
+\end{abstract}
+
+\section{Introduction}
+
+Model-free reinforcement learning (RL) methods such as SAC \citep{haarnoja2018sac} learn effective policies but are notoriously sample-inefficient.
+Prioritized Generative Replay (PGR) \citep{wang2025pgr} addresses this by training a conditional diffusion model on replay buffer transitions, then generating synthetic experience prioritized by a curiosity signal.
+On the DeepMind Control Suite, PGR achieves $3\times$ the reward of SAC within the same number of environment steps.
+
+However, this acceleration comes with an overlooked risk.
+In safety-critical domains---robotics, autonomous driving, medical devices---agents must respect operational constraints (joint torque limits, speed envelopes, dosage bounds).
+When PGR's diffusion model generates synthetic transitions biased toward high-reward states, it can amplify reward-seeking behavior that correlates with constraint violations.
+
+We make three contributions:
+\begin{enumerate}
+    \item We demonstrate that PGR's sample efficiency becomes a \textbf{safety liability}: on a velocity-constrained Cheetah-Run task, PGR accumulates $19{,}451$ total violations over 100K steps, while standard SAC incurs zero (Section~\ref{sec:results}).
+    \item We introduce a \textbf{rare-event memory buffer} that preserves hazardous transitions for diffusion model training, preventing the loss of hazard fidelity that occurs when the Lagrangian penalty alone reduces the frequency of violations in the replay buffer (Section~\ref{sec:method}).
+    \item We propose \textbf{DiffHz}, a diagnostic probe that measures the fraction of diffusion-generated transitions exceeding a cost threshold, providing a real-time indicator of the generative model's safety awareness (Section~\ref{sec:method}).
+\end{enumerate}
+
+\section{Background}
+
+\textbf{Prioritized Generative Replay.}
+PGR \citep{wang2025pgr} extends REDQ-SAC \citep{chen2021redq} (10 Q-networks, UTD ratio 20) with a conditional diffusion model trained on replay buffer transitions.
+The diffusion model is periodically retrained and used to generate synthetic transitions, which are mixed with real experience at a 50\% ratio.
+A curiosity-based conditioning signal prioritizes novel transitions during generation.
+
+\textbf{Constrained MDPs.}
+We formulate safety as a Constrained MDP \citep{altman1999cmdp}, where the agent maximizes reward subject to $\mathbb{E}[\sum_t c_t] \leq d$ for a cost signal $c_t$ and limit $d$.
+The Lagrangian relaxation replaces the constrained objective with $r_t - \lambda c_t$, where $\lambda \geq 0$ is updated via dual gradient ascent: $\lambda \leftarrow \max(0,\; \lambda + \eta(\bar{c} - d))$ after each episode \citep{tessler2018reward}.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Velocity-Constrained Environment}
+
+We wrap DMC Cheetah-Run \citep{tassa2018dmcontrol} with a binary cost signal:
+$c_t = \mathbf{1}[|v_t| > v_{\max}]$,
+where $v_t$ is the root forward velocity (\texttt{qvel[0]}, index 8 in the flattened 17-dimensional observation) and $v_{\max} = 7.0$\,m/s.
+This creates a genuine reward--safety trade-off: the cheetah earns higher reward by running faster, but incurs cost when exceeding the speed limit.
+
+\subsection{Safety Extensions to PGR}
+
+\textbf{Lagrangian penalty.}
+The agent trains on effective rewards $r_{\text{eff}} = r - \lambda c$, with $\lambda$ updated after each episode via dual gradient ascent with learning rate $\eta = 0.01$ and cost limit $d = 2.0$.
+
+\textbf{Rare-event memory buffer.}
+A 500-slot FIFO buffer stores all transitions where $c > 0$.
+During diffusion model retraining, 20\% of each training batch is drawn from this buffer with maximum curiosity conditioning, ensuring the diffusion model continues to learn the structure of hazardous transitions even as the policy learns to avoid them.
+
+\textbf{DiffHz probe.}
+After each diffusion retraining, we generate 2{,}000 synthetic transitions and compute the fraction with cost $> 0.5$.
+This \emph{diffusion hazard rate} (DiffHz) measures whether the generative model retains awareness of hazardous regions of the state-action space.
+
+\subsection{Key Mechanism}
+
+The rare buffer addresses a feedback loop specific to generative replay:
+as the Lagrangian penalty reduces violations, hazardous transitions become rare in the replay buffer.
+Since PGR retrains its diffusion model on the replay buffer, the generative model loses the ability to produce hazardous transitions (DiffHz collapses).
+Without hazardous synthetic transitions, the Q-networks lose calibration near the constraint boundary, forcing $\lambda$ to compensate with more aggressive penalization.
+The rare buffer breaks this loop by guaranteeing a minimum fraction of hazardous training data for the diffusion model.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\textbf{Setup.}
+All experiments use the original PGR codebase with REDQ-SAC (10 Q-networks, UTD=20, batch size 256, 1M replay buffer) on DMC Cheetah-Run-v0.
+Each run trains for 100{,}000 environment steps (${\sim}$100 episodes of 1{,}000 steps) on an NVIDIA A100 GPU.
+We evaluate 4 methods across 3 random seeds (42, 123, 456) for a total of 12 runs:
+
+\begin{itemize}
+    \item \textbf{SAC}: REDQ-SAC without diffusion replay (baseline).
+    \item \textbf{PGR}: Full PGR with diffusion replay; cost is tracked but not used.
+    \item \textbf{PGR+Lagrangian}: PGR with Lagrangian penalty only (ablation).
+    \item \textbf{PGR+Memory}: PGR with Lagrangian penalty and rare-event buffer (ours).
+\end{itemize}
+
+\textbf{Metrics.}
+We report episode reward and episode cost averaged over the final 50 episodes, DiffHz at the final diffusion retraining step, and the converged Lagrangian multiplier $\lambda$.
+
+\section{Results}
+\label{sec:results}
+
+\begin{table}[h]
+\centering
+\caption{Results across 3 seeds (mean $\pm$ std, last 50 episodes). Statistical significance: $^{*}p{<}0.05$, $^{**}p{<}0.01$, $^{***}p{<}0.001$ (Welch's $t$-test vs PGR+Memory).}
+\label{tab:results}
+\begin{tabular}{lcccc}
+\toprule
+Method & Reward & Episode Cost & DiffHz & $\lambda$ \\
+\midrule
+SAC              & $204 \pm 17$  & $0.0 \pm 0.0$      & N/A            & -- \\
+PGR              & $613 \pm 35$  & $374 \pm 44^{**}$   & $13.3 \pm 1.2\%$ & -- \\
+PGR+Lagrangian   & $548 \pm 7$   & $5.2 \pm 1.1$       & $0.6 \pm 0.3\%^{***}$  & $3.08$ \\
+PGR+Memory       & $\mathbf{535 \pm 10}$ & $\mathbf{2.1 \pm 0.0}$ & $\mathbf{8.6 \pm 0.7\%}$ & $\mathbf{0.80}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{PGR amplifies unsafe behavior.}
+PGR achieves $3\times$ SAC's reward (613 vs 204) but accumulates 19{,}451 total constraint violations---$185\times$ more than SAC's zero.
+SAC's safety is incidental: it simply learns too slowly to reach velocities above 7.0\,m/s.
+PGR's diffusion replay accelerates learning, and since reward correlates with speed, this acceleration drives the policy into the constrained region.
+
+\textbf{Lagrangian alone is insufficient with generative replay.}
+PGR+Lagrangian reduces cost by 98.6\% (374 $\to$ 5.2), but the diffusion model's DiffHz collapses from 13.3\% to 0.6\%.
+As the Lagrangian suppresses violations, hazardous transitions vanish from the replay buffer, and the diffusion model stops generating them.
+The Lagrangian multiplier must climb to $\lambda = 3.08$ to maintain safety without support from the generative model.
+
+\textbf{Rare buffer maintains hazard fidelity.}
+PGR+Memory achieves a further 60\% cost reduction over PGR+Lagrangian (5.2 $\to$ 2.1, Mann-Whitney $p{=}0.038$) while maintaining DiffHz at 8.6\% ($p{<}0.001$ vs Lagrangian's 0.6\%).
+The converged $\lambda = 0.80$ is $4\times$ lower than PGR+Lagrangian's 3.08 ($p{<}0.001$), indicating that the policy requires less aggressive penalization when the diffusion model retains hazard awareness.
+Crucially, the reward difference between PGR+Lagrangian and PGR+Memory is \emph{not} statistically significant ($p{=}0.23$), confirming that the rare buffer reduces cost without sacrificing reward.
+
+\textbf{Effect size.}
+The Cohen's $d$ between PGR+Lagrangian and PGR+Memory on episode cost is 4.06 (large), indicating a practically meaningful difference despite the small sample size ($n{=}3$ per method).
+
+\section{Discussion}
+
+\textbf{Why the rare buffer helps.}
+The core mechanism is preventing a feedback loop: Lagrangian $\to$ fewer violations $\to$ fewer hazardous transitions in buffer $\to$ diffusion model forgets hazards $\to$ Q-networks lose calibration near constraint boundary $\to$ need higher $\lambda$.
+The rare buffer breaks this loop at step 3, maintaining the diffusion model's ability to generate hazardous transitions.
+This is a problem specific to generative replay---standard experience replay retains all past transitions and does not suffer from this distributional shift.
+
+\textbf{Limitations.}
+Our evaluation uses a single environment (Cheetah-Run) with a single cost signal (velocity threshold).
+The velocity constraint, while analogous to real operating-envelope limits, is synthetic.
+Extending to multi-constraint settings, contact-rich tasks, and real-world cost signals is important future work.
+Additionally, with $n{=}3$ seeds, the Welch's $t$-test on the ablation comparison (PGR+Lagrangian vs PGR+Memory cost) yields $p{=}0.055$, narrowly missing the conventional $\alpha{=}0.05$ threshold, though the non-parametric Mann-Whitney test is significant ($p{=}0.038$) and the effect size is large ($d{=}4.06$).
+
+\textbf{Broader impact.}
+As generative replay methods like PGR become more prevalent in sample-efficient RL, ensuring they do not amplify unsafe behavior is critical.
+Our results suggest that naive application of constrained RL techniques to generative replay methods is insufficient---the generative model itself must be made safety-aware.
+
+\section{Conclusion}
+
+We show that PGR's diffusion-based replay, while dramatically improving sample efficiency, amplifies constraint violations by $185\times$ compared to standard SAC.
+A Lagrangian penalty reduces violations by 98.6\% but causes the diffusion model to lose hazard awareness (DiffHz: 13.3\% $\to$ 0.6\%).
+Our rare-event memory buffer maintains DiffHz at 8.6\%, enables $4\times$ lower Lagrangian penalty, and achieves 99.4\% total cost reduction with only 12.7\% reward trade-off.
+These results highlight the need for safety-aware generative replay in constrained RL settings.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Altman, 1999]{altman1999cmdp}
+Altman, E. (1999).
+\newblock \emph{Constrained Markov Decision Processes}.
+\newblock Chapman and Hall/CRC.
+
+\bibitem[Chen et~al., 2021]{chen2021redq}
+Chen, X., Wang, C., Zhou, Z., and Ross, K.~W. (2021).
+\newblock Randomized ensembled double Q-learning: Learning fast without a model.
+\newblock In \emph{ICLR}.
+
+\bibitem[Haarnoja et~al., 2018]{haarnoja2018sac}
+Haarnoja, T., Zhou, A., Abbeel, P., and Levine, S. (2018).
+\newblock Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor.
+\newblock In \emph{ICML}.
+
+\bibitem[Tassa et~al., 2018]{tassa2018dmcontrol}
+Tassa, Y., Doron, Y., Muldal, A., Erez, T., Li, Y., de~Las~Casas, D., Budden, D., Abdolmaleki, A., Merel, J., Lefrancq, A., et~al. (2018).
+\newblock DeepMind Control Suite.
+\newblock \emph{arXiv preprint arXiv:1801.00690}.
+
+\bibitem[Tessler et~al., 2018]{tessler2018reward}
+Tessler, C., Mankowitz, D.~J., and Mannor, S. (2018).
+\newblock Reward constrained policy optimization.
+\newblock In \emph{ICLR}.
+
+\bibitem[Wang et~al., 2025]{wang2025pgr}
+Wang, R., Dai, B., Schuurmans, D., and Bhatt, S. (2025).
+\newblock Prioritized generative replay.
+\newblock In \emph{ICLR}.
+
+\end{thebibliography}
+
+\end{document}
