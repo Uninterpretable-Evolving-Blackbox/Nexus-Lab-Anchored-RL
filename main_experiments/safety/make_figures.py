@@ -76,7 +76,7 @@ METHODS = [
     ('sac', 'SAC (no diffusion)', '#ff7f0e'),
     ('pgr', 'PGR', '#1f77b4'),
     ('pgr_lagrangian', 'PGR+Lagrangian', '#d62728'),
-    ('pgr_memory', 'PGR+Memory (ours)', '#2ca02c'),
+    ('pgr_memory', 'PGR+L+Buffer (ours)', '#2ca02c'),
 ]
 
 
@@ -143,7 +143,7 @@ def plot_diffhz(results_dir, seeds=(42, 123, 456),
 
     fig, ax = plt.subplots(figsize=(7, 4))
 
-    for method, label, color in [METHODS[1], METHODS[2]]:  # PGR and PGR+Memory only
+    for method, label, color in [METHODS[1], METHODS[2], METHODS[3]]:  # PGR, Lagrangian, L+Buffer
         results_list = load_results(results_dir, method, seeds)
         if not results_list:
             continue
@@ -220,11 +220,11 @@ def plot_summary_bars(results_dir, seeds=(42, 123, 456),
         mean_costs.append(np.mean(costs))
         std_costs.append(np.std(costs))
 
-    colors = ['#ff7f0e', '#1f77b4', '#2ca02c'][:len(labels)]
+    colors = ['#ff7f0e', '#1f77b4', '#d62728', '#2ca02c'][:len(labels)]
     x = np.arange(len(labels))
     w = 0.35
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5),
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5),
                                     gridspec_kw={'width_ratios': [1, 1]})
 
     # Left: Reward bars
@@ -234,7 +234,7 @@ def plot_summary_bars(results_dir, seeds=(42, 123, 456),
     ax1.set_ylabel('Episode Reward')
     ax1.set_title('(a) Reward (last 50 eps)')
     ax1.set_xticks(x)
-    ax1.set_xticklabels(labels, fontsize=9)
+    ax1.set_xticklabels(labels, fontsize=8, rotation=15, ha='right')
     ax1.grid(True, alpha=0.2, axis='y')
     ax1.set_ylim(bottom=0)
     # Annotate values
@@ -249,7 +249,7 @@ def plot_summary_bars(results_dir, seeds=(42, 123, 456),
     ax2.set_ylabel('Episode Cost')
     ax2.set_title('(b) Cost (last 50 eps, lower = safer)')
     ax2.set_xticks(x)
-    ax2.set_xticklabels(labels, fontsize=9)
+    ax2.set_xticklabels(labels, fontsize=8, rotation=15, ha='right')
     ax2.grid(True, alpha=0.2, axis='y')
     ax2.set_ylim(bottom=0)
     # Annotate values
