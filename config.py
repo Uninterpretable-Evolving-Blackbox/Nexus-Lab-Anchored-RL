@@ -69,7 +69,7 @@ SALIENCE_WEIGHT = 3.0     # salience-memory transitions get a smaller boost than
 # High-reward memory is separate from salience memory:
 # it stores genuinely good outcomes by reward, not critic TD error.
 HIGH_REWARD_BUFFER_SIZE = 500
-HIGH_REWARD_BATCH_RATIO = 0.1
+HIGH_REWARD_BATCH_RATIO = 0.05
 HIGH_REWARD_WEIGHT = 2.0
 HIGH_REWARD_THRESHOLD = 1.0
 

@@ -30,20 +30,21 @@ class HighRewardBuffer:
 
     def add(self, state, action, reward, cost, next_state, done):
         """
-        Store a transition if its reward is high enough.
+        Store a transition if it is both high-reward and safe.
 
         When full, evicts the current lowest-reward transition only if the new
         one is better.
         """
         reward = float(reward)
-        if reward < self.reward_threshold:
+        cost = float(cost)
+        if reward < self.reward_threshold or cost > 0:
             return
 
         transition = {
             "state": np.array(state, dtype=np.float32),
             "action": np.array(action, dtype=np.float32),
             "reward": reward,
-            "cost": float(cost),
+            "cost": cost,
             "next_state": np.array(next_state, dtype=np.float32),
             "done": float(done),
         }
