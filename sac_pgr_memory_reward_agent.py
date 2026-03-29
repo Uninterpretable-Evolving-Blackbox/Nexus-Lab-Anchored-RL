@@ -14,11 +14,14 @@ from config import (
     BATCH_SIZE,
     DEVICE,
     HIGH_REWARD_BATCH_RATIO,
+    HIGH_REWARD_THRESHOLD,
     HIGH_REWARD_WEIGHT,
     PGR_START_BUFFER,
     RARE_BATCH_RATIO,
     RARE_WEIGHT,
     REPLAY_RATIO,
+    SAFE_EPISODE_COST_LIMIT,
+    TOP_K_HIGH_REWARD_PER_EPISODE,
 )
 from high_reward_buffer import HighRewardBuffer
 from networks import normalize_scores
@@ -35,11 +38,26 @@ class SACPGRMemoryRewardAgent(SACPGRAgent):
         self.log_interval = 250
 
     def add_transition(self, s, a, r, c, ns, d):
-        """Store transitions in replay, hazard memory, and reward memory as appropriate."""
+        """Store transitions in replay and hazard memory as appropriate."""
         self.buffer.add(s, a, r, c, ns, d)
         if c > 0:
             self.rare_buffer.add(s, a, r, c, ns, d)
-        self.high_reward_buffer.add(s, a, r, c, ns, d)
+
+    def store_good_episode_transitions(self, episode_transitions, ep_reward, ep_cost):
+        """Store top high-reward safe transitions, but only from safe episodes."""
+        _ = ep_reward  # kept for API symmetry and future episode-level criteria
+        if ep_cost > SAFE_EPISODE_COST_LIMIT:
+            return
+
+        good_transitions = [t for t in episode_transitions if t[2] >= HIGH_REWARD_THRESHOLD and t[3] == 0]
+        if not good_transitions:
+            return
+
+        good_transitions.sort(key=lambda t: t[2], reverse=True)
+        top_transitions = good_transitions[:TOP_K_HIGH_REWARD_PER_EPISODE]
+
+        for s, a, r, c, ns, d in top_transitions:
+            self.high_reward_buffer.add(s, a, r, c, ns, d)
 
     def _maybe_log_buffers(self):
         if self.train_steps % self.log_interval != 0:
@@ -178,10 +196,11 @@ class SACPGRMemoryRewardAgent(SACPGRAgent):
 
         self._sac_update(states, actions, rewards, costs, next_states, dones)
 
-        print(
-            f"[PGR+Memory+Reward] "
-            f"replay={len(self.buffer)} "
-            f"rare={len(self.rare_buffer)} "
-            f"high_reward={len(self.high_reward_buffer)} "
-            f"diff_updates={self.diffusion_updates}"
-        )
+        if self.train_steps % 100 == 0:
+            print(
+                f"[PGR+Memory+Reward] "
+                f"replay={len(self.buffer)} "
+                f"rare={len(self.rare_buffer)} "
+                f"high_reward={len(self.high_reward_buffer)} "
+                f"diff_updates={self.diffusion_updates}"
+            )

@@ -72,6 +72,8 @@ HIGH_REWARD_BUFFER_SIZE = 500
 HIGH_REWARD_BATCH_RATIO = 0.05
 HIGH_REWARD_WEIGHT = 2.0
 HIGH_REWARD_THRESHOLD = 1.0
+SAFE_EPISODE_COST_LIMIT = 0
+TOP_K_HIGH_REWARD_PER_EPISODE = 5
 
 # ── Cost constraint (Lagrangian) ────────────────────────────────────────────
 # This is what makes agents actually AVOID hazards. Without this, the policy

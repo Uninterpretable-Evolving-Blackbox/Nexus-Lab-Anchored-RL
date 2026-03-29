@@ -65,7 +65,7 @@ def plot_multiseed(results: dict, save_path: str):
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    def smooth(data, window=50):
+    def smooth(data, window=20):
         if len(data) < window:
             return np.array(data)
         return np.convolve(data, np.ones(window) / window, mode="valid")

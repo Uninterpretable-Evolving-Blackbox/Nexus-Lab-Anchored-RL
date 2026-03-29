@@ -46,11 +46,13 @@ def train_agent(agent, env, n_episodes: int, label: str, updates_per_episode: in
         state = env.reset()
         ep_reward = 0.0
         ep_cost = 0.0
+        episode_transitions = []
 
         # ── Roll out one episode ─────────────────────────────────────────
         for _ in range(max_steps):
             action = agent.select_action(state)
             next_state, reward, cost, done, _ = env.step(action)
+            episode_transitions.append((state, action, reward, cost, next_state, done))
 
             # Store the transition (the agent decides which buffers to use)
             agent.add_transition(state, action, reward, cost, next_state, done)
@@ -69,6 +71,8 @@ def train_agent(agent, env, n_episodes: int, label: str, updates_per_episode: in
         # This tells the agent how much cost it incurred, so it can
         # auto-tune λ to penalize hazards appropriately.
         agent.record_episode_cost(ep_cost)
+        if hasattr(agent, "store_good_episode_transitions"):
+            agent.store_good_episode_transitions(episode_transitions, ep_reward, ep_cost)
 
         # ── Gradient updates (off-policy: we can update multiple times) ──
         for _ in range(updates_per_episode):
